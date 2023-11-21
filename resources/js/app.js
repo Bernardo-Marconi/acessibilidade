@@ -9,6 +9,20 @@ if (!firebase.apps.length) {
 }
 const firestore = firebase.firestore();
 
+const endCall = () => {
+  var laravelToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+  axios.post("/remove-room", {
+    user_id: getParameterByName("user_id"),
+  }, 
+  {
+    headers: {
+      'X-CSRF-TOKEN': laravelToken, 
+      'Content-Type': 'multipart/form-data'
+    } 
+  }).then(data => {
+    history.back()
+  })
+}
 const servers = {
   iceServers: [
     {
@@ -24,10 +38,9 @@ let localStream = null;
 let remoteStream = null;
 
 const hangupButton = document.getElementById('hangupButton');
-const callButton = document.getElementById('hangupButton');
 
 const start = async () => {
-  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
   remoteStream = new MediaStream();
 
   // Push tracks from local stream to peer connection
@@ -46,9 +59,46 @@ const start = async () => {
   remoteVideo.srcObject = remoteStream;
   
 };
+window.start = start
+const answer = async (room)=>  {
+  const callId = room;
+  const callDoc = firestore.collection('calls').doc(callId);
+  const answerCandidates = callDoc.collection('answerCandidates');
+  const offerCandidates = callDoc.collection('offerCandidates');
+
+  pc.onicecandidate = (event) => {
+    event.candidate && answerCandidates.add(event.candidate.toJSON());
+  };
+
+  const callData = (await callDoc.get()).data();
+
+  const offerDescription = callData.offer;
+  await pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
+
+  const answerDescription = await pc.createAnswer();
+  await pc.setLocalDescription(answerDescription);
+
+  const answer = {
+    type: answerDescription.type,
+    sdp: answerDescription.sdp,
+  };
+
+  await callDoc.update({ answer });
+
+  offerCandidates.onSnapshot((snapshot) => {
+    snapshot.docChanges().forEach((change) => {
+      console.log(change);
+      if (change.type === 'added') {
+        let data = change.doc.data();
+        pc.addIceCandidate(new RTCIceCandidate(data));
+      }
+    });
+  });
+}
+window.answer = answer
 
 // 2. Create an offer
-const createOffer = async () => {
+const createOffer = async  ()  => {
   // Reference Firestore collections for signaling
   const callDoc = firestore.collection('calls').doc();
   const offerCandidates = callDoc.collection('offerCandidates');
@@ -74,6 +124,7 @@ const createOffer = async () => {
   callDoc.onSnapshot((snapshot) => {
     const data = snapshot.data();
     if (!pc.currentRemoteDescription && data?.answer) {
+      document.querySelector('.attendant').textContent = `Atendente Online`
       const answerDescription = new RTCSessionDescription(data.answer);
       pc.setRemoteDescription(answerDescription);
     }
@@ -88,7 +139,7 @@ const createOffer = async () => {
       }
     });
   });
-
+  console.log(callDoc.id)
   return callDoc.id
 };
 
@@ -97,18 +148,29 @@ function getParameterByName(name) {
   return match && decodeURIComponent(match[1].replace(/\+/g, ' '));
 }
 
-window.onload = () => {
-  start()
-  createOffer().then(offerId => {
-    var laravelToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
-    axios.post('/save-room', {
-      user_id: getParameterByName("user_id"),
-      room_id: offerId
-    }, { 
-      headers: {
-        'X-CSRF-TOKEN': laravelToken, 
-        'Content-Type': 'multipart/form-data'
-      } 
+window.onload = async () => {
+  await start()
+  let urlPath = location.pathname.split("/").filter(a => a !== "")
+  if(urlPath.length === 3) {
+    answer(urlPath[2])
+  }
+  else {
+    createOffer().then(offerId => {
+      var laravelToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+      axios.post('/save-room', {
+        user_id: getParameterByName("user_id"),
+        room_id: offerId
+      }, 
+      { 
+        headers: {
+          'X-CSRF-TOKEN': laravelToken, 
+          'Content-Type': 'multipart/form-data'
+        } 
+      })
     })
-  })
+  }
 }
+window.addEventListener("beforeunload", endCall)
+
+
+hangupButton.addEventListener('click', endCall)
